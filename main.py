@@ -19,6 +19,7 @@ class RepresentationType(Enum):
     VOXEL = auto()
     STEPAN = auto()
 
+
 def set_seed(seed):
     random.seed(seed)
     torch.manual_seed(seed)
@@ -27,14 +28,17 @@ def set_seed(seed):
     torch.backends.cudnn.benchmark = False
     np.random.seed(seed)
 
+
 def compute_epe_error(pred_flow: torch.Tensor, gt_flow: torch.Tensor):
     '''
     end-point-error (ground truthと予測値の二乗誤差)を計算
     pred_flow: torch.Tensor, Shape: torch.Size([B, 2, 480, 640]) => 予測したオプティカルフローデータ
     gt_flow: torch.Tensor, Shape: torch.Size([B, 2, 480, 640]) => 正解のオプティカルフローデータ
     '''
-    epe = torch.mean(torch.mean(torch.norm(pred_flow - gt_flow, p=2, dim=1), dim=(1, 2)), dim=0)
+    epe = torch.mean(torch.mean(torch.norm(
+        pred_flow - gt_flow, p=2, dim=1), dim=(1, 2)), dim=0)
     return epe
+
 
 def save_optical_flow_to_npy(flow: torch.Tensor, file_name: str):
     '''
@@ -44,10 +48,12 @@ def save_optical_flow_to_npy(flow: torch.Tensor, file_name: str):
     '''
     np.save(f"{file_name}.npy", flow.cpu().numpy())
 
+
 @hydra.main(version_base=None, config_path="configs", config_name="base")
 def main(args: DictConfig):
     set_seed(args.seed)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = 'cpu'
     '''
         ディレクトリ構造:
 
@@ -70,7 +76,7 @@ def main(args: DictConfig):
             ├─zurich_city_11_b
             └─zurich_city_11_c
         '''
-    
+
     # ------------------
     #    Dataloader
     # ------------------
@@ -84,15 +90,15 @@ def main(args: DictConfig):
     test_set = loader.get_test_dataset()
     collate_fn = train_collate
     train_data = DataLoader(train_set,
-                                 batch_size=args.data_loader.train.batch_size,
-                                 shuffle=args.data_loader.train.shuffle,
-                                 collate_fn=collate_fn,
-                                 drop_last=False)
+                            batch_size=args.data_loader.train.batch_size,
+                            shuffle=args.data_loader.train.shuffle,
+                            collate_fn=collate_fn,
+                            drop_last=False)
     test_data = DataLoader(test_set,
-                                 batch_size=args.data_loader.test.batch_size,
-                                 shuffle=args.data_loader.test.shuffle,
-                                 collate_fn=collate_fn,
-                                 drop_last=False)
+                           batch_size=args.data_loader.test.batch_size,
+                           shuffle=args.data_loader.test.shuffle,
+                           collate_fn=collate_fn,
+                           drop_last=False)
 
     '''
     train data:
@@ -115,7 +121,8 @@ def main(args: DictConfig):
     # ------------------
     #   optimizer
     # ------------------
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.train.initial_learning_rate, weight_decay=args.train.weight_decay)
+    optimizer = torch.optim.Adam(model.parameters(
+    ), lr=args.train.initial_learning_rate, weight_decay=args.train.weight_decay)
     # ------------------
     #   Start training
     # ------------------
@@ -125,9 +132,9 @@ def main(args: DictConfig):
         print("on epoch: {}".format(epoch+1))
         for i, batch in enumerate(tqdm(train_data)):
             batch: Dict[str, Any]
-            event_image = batch["event_volume"].to(device) # [B, 4, 480, 640]
-            ground_truth_flow = batch["flow_gt"].to(device) # [B, 2, 480, 640]
-            flow = model(event_image) # [B, 2, 480, 640]
+            event_image = batch["event_volume"].to(device)  # [B, 4, 480, 640]
+            ground_truth_flow = batch["flow_gt"].to(device)  # [B, 2, 480, 640]
+            flow = model(event_image)  # [B, 2, 480, 640]
             loss: torch.Tensor = compute_epe_error(flow, ground_truth_flow)
             print(f"batch {i} loss: {loss.item()}")
             optimizer.zero_grad()
@@ -140,7 +147,7 @@ def main(args: DictConfig):
     # Create the directory if it doesn't exist
     if not os.path.exists('checkpoints'):
         os.makedirs('checkpoints')
-    
+
     current_time = time.strftime("%Y%m%d%H%M%S")
     model_path = f"checkpoints/model_{current_time}.pth"
     torch.save(model.state_dict(), model_path)
@@ -157,7 +164,7 @@ def main(args: DictConfig):
         for batch in tqdm(test_data):
             batch: Dict[str, Any]
             event_image = batch["event_volume_old"].to(device)
-            batch_flow = model(event_image) # [1, 2, 480, 640]
+            batch_flow = model(event_image)  # [1, 2, 480, 640]
             flow = torch.cat((flow, batch_flow), dim=0)  # [N, 2, 480, 640]
         print("test done")
     # ------------------
@@ -165,6 +172,7 @@ def main(args: DictConfig):
     # ------------------
     file_name = "submission.npy"
     save_optical_flow_to_npy(flow, file_name)
+
 
 if __name__ == "__main__":
     main()

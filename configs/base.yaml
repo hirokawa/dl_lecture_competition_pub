@@ -1,4 +1,4 @@
-dataset_path: data
+dataset_path: data_ec
 seed: 42
 num_epoch: 100
 data_loader:
