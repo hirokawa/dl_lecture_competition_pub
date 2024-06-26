@@ -1,3 +1,4 @@
+import os
 import re
 import random
 import time
@@ -8,8 +9,9 @@ import numpy as np
 import pandas
 import torch
 import torch.nn as nn
-import torchvision
+# import torchvision
 from torchvision import transforms
+# from transformers import AutoTokenizer, AutoModel
 
 
 def set_seed(seed):
@@ -63,7 +65,7 @@ def process_text(text):
 
 # 1. データローダーの作成
 class VQADataset(torch.utils.data.Dataset):
-    def __init__(self, df_path, image_dir, transform=None, answer=True):
+    def __init__(self, df_path, image_dir, transform=None, answer=True, corpus=None):
         self.transform = transform  # 画像の前処理
         self.image_dir = image_dir  # 画像ファイルのディレクトリ
         # 画像ファイルのパス，question, answerを持つDataFrame
@@ -76,6 +78,8 @@ class VQADataset(torch.utils.data.Dataset):
         self.idx2question = {}
         self.idx2answer = {}
 
+        # self.tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
+
         # 質問文に含まれる単語を辞書に追加
         for question in self.df["question"]:
             question = process_text(question)
@@ -87,6 +91,7 @@ class VQADataset(torch.utils.data.Dataset):
         self.idx2question = {v: k for k, v in self.question2idx.items()}
 
         if self.answer:
+
             # 回答に含まれる単語を辞書に追加
             for answers in self.df["answers"]:
                 for answer in answers:
@@ -94,6 +99,14 @@ class VQADataset(torch.utils.data.Dataset):
                     word = process_text(word)
                     if word not in self.answer2idx:
                         self.answer2idx[word] = len(self.answer2idx)
+
+            if corpus is not None:  # 外部コーパスを追加
+                df = pandas.read_csv(corpus)
+                for index, row in df.iterrows():
+                    word = process_text(row['answer'])
+                    if word not in self.answer2idx:
+                        self.answer2idx[word] = len(self.answer2idx)
+
             self.idx2answer = {v: k for k,
                                v in self.answer2idx.items()}  # 逆変換用の辞書(answer)
 
@@ -134,22 +147,38 @@ class VQADataset(torch.utils.data.Dataset):
         image = Image.open(f"{self.image_dir}/{self.df['image'][idx]}")
         image = self.transform(image)
         question = np.zeros(len(self.idx2question) + 1)  # 未知語用の要素を追加
-        question_words = self.df["question"][idx].split(" ")
-        for word in question_words:
-            try:
-                question[self.question2idx[word]] = 1  # one-hot表現に変換
-            except KeyError:
-                question[-1] = 1  # 未知語
+        question_words = process_text(self.df["question"][idx]).split(" ")
+
+        if True:  # one-hot
+            for word in question_words:
+                try:
+                    question[self.question2idx[word]] = 1  # one-hot表現に変換
+                except KeyError:
+                    question[-1] = 1  # 未知語
+            qt = torch.Tensor(question)
+        else:
+            encoded_text = self.tokenizer(text=question_words,
+                                          padding='longest',
+                                          max_length=24,
+                                          truncation=True,
+                                          return_tensors='pt',
+                                          return_token_type_ids=True,
+                                          return_attention_mask=True,
+                                          )
+            qt = {'input_idx': encoded_text['input_ids'].squeeze(),
+                  'token_type_ids': encoded_text['token_type_ids'].squeeze(),
+                  'attention_mask': encoded_text['attention_mask'].squeeze()}
 
         if self.answer:
             answers = [self.answer2idx[process_text(
                 answer["answer"])] for answer in self.df["answers"][idx]]
             mode_answer_idx = mode(answers)  # 最頻値を取得（正解ラベル）
 
-            return image, torch.Tensor(question), torch.Tensor(answers), int(mode_answer_idx)
+            return image, qt, torch.Tensor(answers), \
+                int(mode_answer_idx)
 
         else:
-            return image, torch.Tensor(question)
+            return image, qt
 
     def __len__(self):
         return len(self.df)
@@ -302,7 +331,10 @@ class VQAModel(nn.Module):
     def __init__(self, vocab_size: int, n_answer: int):
         super().__init__()
         self.resnet = ResNet18()
+        # self.resnet = ResNet50()
         self.text_encoder = nn.Linear(vocab_size, 512)
+
+        # self.text_encoder = AutoModel.from_pretrained('bert-base-uncased')
 
         self.fc = nn.Sequential(
             nn.Linear(1024, 512),
@@ -374,6 +406,15 @@ def eval(model, dataloader, optimizer, criterion, device):
 
 
 def main():
+
+    cp_folder = "./checkpoint/"
+    all_subdirs = [d for d in os.listdir(cp_folder)
+                   if os.path.isdir(os.path.join(cp_folder, d))]
+    cp_subdirs = [d for d in all_subdirs if d.startwidth("checkpoint-")]
+    cp_numbers = [int(d.split("-")[1]) for d in cp_subdirs]
+    latest_cp_number = max(cp_numbers, default=0)
+    latest_cp_path = os.path.join(cp_folder, f"checkpoint-{latest_cp_number}")
+
     # deviceの設定
     set_seed(42)
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -381,12 +422,17 @@ def main():
     # dataloader / model
     transform = transforms.Compose([
         transforms.Resize((224, 224)),
+        transforms.RandomHorizontalFlip(p=0.5),
         transforms.ToTensor()
     ])
-    train_dataset = VQADataset(
-        df_path="./data/train.json", image_dir="./data/train", transform=transform)
-    test_dataset = VQADataset(df_path="./data/valid.json",
-                              image_dir="./data/valid", transform=transform, answer=False)
+    train_dataset = VQADataset(df_path="./data_vqa/train.json",
+                               image_dir="./data_vqa/train",
+                               corpus="./data_vqa/class_mapping.csv",
+                               transform=transform)
+    test_dataset = VQADataset(df_path="./data_vqa/valid.json",
+                              image_dir="./data_vqa/valid",
+                              corpus="./data_vqa/class_mapping.csv",
+                              transform=transform, answer=False)
     test_dataset.update_dict(train_dataset)
 
     train_loader = torch.utils.data.DataLoader(
@@ -395,16 +441,29 @@ def main():
         test_dataset, batch_size=1, shuffle=False)
 
     model = VQAModel(vocab_size=len(train_dataset.question2idx)+1,
-                     n_answer=len(train_dataset.answer2idx)).to(device)
+                     n_answer=len(train_dataset.answer2idx))
 
     # optimizer / criterion
     num_epoch = 20
     criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(
-        model.parameters(), lr=0.001, weight_decay=1e-5)
+    # optimizer = torch.optim.Adam(
+    #    model.parameters(), lr=0.001, weight_decay=1e-5)
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001,
+                                 betas=(0.9, 0.999), amsgrad=True)
+    num_steps = 10
+
+    if True:
+        # checkpoint = torch.load(latest_cp_path+"-model.pth")
+        checkpoint = torch.load("model.pth")
+        model.load_state_dict(checkpoint['model_state_dict'])
+        # optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        epoch0 = checkpoint['epoch']
+
+    model.to(device)
 
     # train model
-    for epoch in range(num_epoch):
+    for epoch in range(epoch0, epoch0+num_epoch):
         train_loss, train_acc, train_simple_acc, train_time = train(
             model, train_loader, optimizer, criterion, device)
         print(f"【{epoch + 1}/{num_epoch}】\n"
@@ -412,6 +471,14 @@ def main():
               f"train loss: {train_loss:.4f}\n"
               f"train acc: {train_acc:.4f}\n"
               f"train simple acc: {train_simple_acc:.4f}")
+
+        if epoch % num_steps == 0 or epoch == epoch0+num_epoch-1:
+            print(f"checkpoint-{epoch} saved")
+            cp_path = os.path.join(cp_folder, f"checkpoint-{epoch}")
+            torch.save({'epoch': epoch,
+                        'model_state_dict': model.state_dict(),
+                        'optimizer_state_dict': optimizer.state_dict()},
+                       cp_path+"-model.pth")
 
     # 提出用ファイルの作成
     model.eval()
@@ -424,7 +491,7 @@ def main():
 
     submission = [train_dataset.idx2answer[id] for id in submission]
     submission = np.array(submission)
-    torch.save(model.state_dict(), "model.pth")
+
     np.save("submission.npy", submission)
 
 
