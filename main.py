@@ -1,4 +1,5 @@
 import os
+import copy
 import re
 import random
 import time
@@ -10,8 +11,10 @@ import pandas
 import torch
 import torch.nn as nn
 # import torchvision
-from torchvision import transforms
+from torchvision import transforms, models
 # from transformers import AutoTokenizer, AutoModel
+
+from gen_vocab import process_text, load_vocab_file
 
 
 def set_seed(seed):
@@ -24,48 +27,10 @@ def set_seed(seed):
     torch.backends.cudnn.benchmark = False
 
 
-def process_text(text):
-    # lowercase
-    text = text.lower()
-
-    # 数詞を数字に変換
-    num_word_to_digit = {
-        'zero': '0', 'one': '1', 'two': '2', 'three': '3', 'four': '4',
-        'five': '5', 'six': '6', 'seven': '7', 'eight': '8', 'nine': '9',
-        'ten': '10'
-    }
-    for word, digit in num_word_to_digit.items():
-        text = text.replace(word, digit)
-
-    # 小数点のピリオドを削除
-    text = re.sub(r'(?<!\d)\.(?!\d)', '', text)
-
-    # 冠詞の削除
-    text = re.sub(r'\b(a|an|the)\b', '', text)
-
-    # 短縮形のカンマの追加
-    contractions = {
-        "dont": "don't", "isnt": "isn't", "arent": "aren't", "wont": "won't",
-        "cant": "can't", "wouldnt": "wouldn't", "couldnt": "couldn't"
-    }
-    for contraction, correct in contractions.items():
-        text = text.replace(contraction, correct)
-
-    # 句読点をスペースに変換
-    text = re.sub(r"[^\w\s':]", ' ', text)
-
-    # 句読点をスペースに変換
-    text = re.sub(r'\s+,', ',', text)
-
-    # 連続するスペースを1つに変換
-    text = re.sub(r'\s+', ' ', text).strip()
-
-    return text
-
-
 # 1. データローダーの作成
 class VQADataset(torch.utils.data.Dataset):
-    def __init__(self, df_path, image_dir, transform=None, answer=True, corpus=None):
+    def __init__(self, df_path, image_dir, transform=None, answer=True,
+                 corpus=None):
         self.transform = transform  # 画像の前処理
         self.image_dir = image_dir  # 画像ファイルのディレクトリ
         # 画像ファイルのパス，question, answerを持つDataFrame
@@ -73,40 +38,12 @@ class VQADataset(torch.utils.data.Dataset):
         self.answer = answer
 
         # question / answerの辞書を作成
-        self.question2idx = {}
-        self.answer2idx = {}
-        self.idx2question = {}
-        self.idx2answer = {}
+        self.question2idx, self.answer2idx = load_vocab_file()
 
-        # self.tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
-
-        # 質問文に含まれる単語を辞書に追加
-        for question in self.df["question"]:
-            question = process_text(question)
-            words = question.split(" ")
-            for word in words:
-                if word not in self.question2idx:
-                    self.question2idx[word] = len(self.question2idx)
         # 逆変換用の辞書(question)
         self.idx2question = {v: k for k, v in self.question2idx.items()}
 
         if self.answer:
-
-            # 回答に含まれる単語を辞書に追加
-            for answers in self.df["answers"]:
-                for answer in answers:
-                    word = answer["answer"]
-                    word = process_text(word)
-                    if word not in self.answer2idx:
-                        self.answer2idx[word] = len(self.answer2idx)
-
-            if corpus is not None:  # 外部コーパスを追加
-                df = pandas.read_csv(corpus)
-                for index, row in df.iterrows():
-                    word = process_text(row['answer'])
-                    if word not in self.answer2idx:
-                        self.answer2idx[word] = len(self.answer2idx)
-
             self.idx2answer = {v: k for k,
                                v in self.answer2idx.items()}  # 逆変換用の辞書(answer)
 
@@ -146,28 +83,20 @@ class VQADataset(torch.utils.data.Dataset):
         """
         image = Image.open(f"{self.image_dir}/{self.df['image'][idx]}")
         image = self.transform(image)
-        question = np.zeros(len(self.idx2question) + 1)  # 未知語用の要素を追加
         question_words = process_text(self.df["question"][idx]).split(" ")
 
-        if True:  # one-hot
-            for word in question_words:
-                try:
-                    question[self.question2idx[word]] = 1  # one-hot表現に変換
-                except KeyError:
-                    question[-1] = 1  # 未知語
-            qt = torch.Tensor(question)
-        else:
-            encoded_text = self.tokenizer(text=question_words,
-                                          padding='longest',
-                                          max_length=24,
-                                          truncation=True,
-                                          return_tensors='pt',
-                                          return_token_type_ids=True,
-                                          return_attention_mask=True,
-                                          )
-            qt = {'input_idx': encoded_text['input_ids'].squeeze(),
-                  'token_type_ids': encoded_text['token_type_ids'].squeeze(),
-                  'attention_mask': encoded_text['attention_mask'].squeeze()}
+        max_word_len = 64
+        question = np.zeros(max_word_len)
+        for idx_, word in enumerate(question_words):
+            if idx_ >= max_word_len:
+                print("idx={:d} exceeds maximum word length".format(idx_))
+
+            if word in self.question2idx:
+                question[idx_] = self.question2idx[word]
+            else:
+                question[idx_] = self.question2idx['<unk>']  # unknown word
+
+        qt = torch.Tensor(question).to(torch.int)
 
         if self.answer:
             answers = [self.answer2idx[process_text(
@@ -251,8 +180,8 @@ class BottleneckBlock(nn.Module):
         self.conv2 = nn.Conv2d(out_channels, out_channels,
                                kernel_size=3, stride=stride, padding=1)
         self.bn2 = nn.BatchNorm2d(out_channels)
-        self.conv3 = nn.Conv2d(
-            out_channels, out_channels * self.expansion, kernel_size=1, stride=1)
+        self.conv3 = nn.Conv2d(out_channels, out_channels * self.expansion,
+                               kernel_size=1, stride=1)
         self.bn3 = nn.BatchNorm2d(out_channels * self.expansion)
         self.relu = nn.ReLU(inplace=True)
 
@@ -328,23 +257,51 @@ def ResNet50():
 
 
 class VQAModel(nn.Module):
-    def __init__(self, vocab_size: int, n_answer: int):
+    def __init__(self, vocab_size: int, n_answer: int, word_embed: int):
         super().__init__()
-        self.resnet = ResNet18()
+        # self.resnet = ResNet18()
         # self.resnet = ResNet50()
-        self.text_encoder = nn.Linear(vocab_size, 512)
 
-        # self.text_encoder = AutoModel.from_pretrained('bert-base-uncased')
+        self.resnet = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
+        # torch.hub.load("pytorch/vision", "resnet18", weights="IMAGENET1K_V1")
+        self.resnet.fc = nn.Linear(
+            in_features=512, out_features=512, bias=True)
+
+        self.hiddien_size = 512
+
+        # self.text_encoder = nn.Linear(vocab_size, 512)
+        self.text_encoder = nn.Linear(self.hiddien_size, 512)
+
+        self.lstm = nn.LSTM(input_size=vocab_size,
+                            hidden_size=self.hiddien_size,
+                            num_layers=2, batch_first=True)
+
+        self.embedding = nn.Embedding(vocab_size+1, vocab_size)
 
         self.fc = nn.Sequential(
+            nn.Dropout(0.5),
             nn.Linear(1024, 512),
             nn.ReLU(inplace=True),
+            nn.Dropout(0.5),
             nn.Linear(512, n_answer)
         )
 
     def forward(self, image, question):
         image_feature = self.resnet(image)  # 画像の特徴量
-        question_feature = self.text_encoder(question)  # テキストの特徴量
+        # question_feature = self.text_encoder(question)  # テキストの特徴量
+
+        # (batchsize, qu_length=30, word_embed=300)
+        question_embedding = self.embedding(question)
+        h, _ = self.lstm(question_embedding)
+        question_feature = h[:, -1]
+
+        # question_feature = torch.cat((hidden, cell), dim=2)
+        # question_feature = question_feature.transpose(0, 1)
+        # question_feature = question_feature.reshape(
+        #    question_feature.size()[0], -1)
+        # question_feature = nn.Tanh(question_feature)
+
+        # question_feature = self.text_encoder(question_feature)
 
         x = torch.cat([image_feature, question_feature], dim=1)
         x = self.fc(x)
@@ -378,7 +335,8 @@ def train(model, dataloader, optimizer, criterion, device):
         # simple accuracy
         simple_acc += (pred.argmax(1) == mode_answer).float().mean().item()
 
-    return total_loss / len(dataloader), total_acc / len(dataloader), simple_acc / len(dataloader), time.time() - start
+    return total_loss / len(dataloader), total_acc / len(dataloader), \
+        simple_acc / len(dataloader), time.time() - start
 
 
 def eval(model, dataloader, optimizer, criterion, device):
@@ -390,7 +348,7 @@ def eval(model, dataloader, optimizer, criterion, device):
 
     start = time.time()
     for image, question, answers, mode_answer in dataloader:
-        image, question, answer, mode_answer = \
+        image, question, _, mode_answer = \
             image.to(device), question.to(device), answers.to(
                 device), mode_answer.to(device)
 
@@ -402,18 +360,16 @@ def eval(model, dataloader, optimizer, criterion, device):
         # simple accuracy
         simple_acc += (pred.argmax(1) == mode_answer).mean().item()
 
-    return total_loss / len(dataloader), total_acc / len(dataloader), simple_acc / len(dataloader), time.time() - start
+    return total_loss / len(dataloader), total_acc / len(dataloader), \
+        simple_acc / len(dataloader), time.time() - start
 
 
 def main():
 
     cp_folder = "./checkpoint/"
-    all_subdirs = [d for d in os.listdir(cp_folder)
-                   if os.path.isdir(os.path.join(cp_folder, d))]
-    cp_subdirs = [d for d in all_subdirs if d.startwidth("checkpoint-")]
-    cp_numbers = [int(d.split("-")[1]) for d in cp_subdirs]
-    latest_cp_number = max(cp_numbers, default=0)
-    latest_cp_path = os.path.join(cp_folder, f"checkpoint-{latest_cp_number}")
+
+    WORD_EMBED = 300
+    LEARNING_RATE, STEP_SIZE, GAMMA = 0.001, 10, 0.1
 
     # deviceの設定
     set_seed(42)
@@ -441,19 +397,20 @@ def main():
         test_dataset, batch_size=1, shuffle=False)
 
     model = VQAModel(vocab_size=len(train_dataset.question2idx)+1,
-                     n_answer=len(train_dataset.answer2idx))
+                     n_answer=len(train_dataset.answer2idx),
+                     word_embed=WORD_EMBED)
 
     # optimizer / criterion
     num_epoch = 20
     criterion = nn.CrossEntropyLoss()
-    # optimizer = torch.optim.Adam(
-    #    model.parameters(), lr=0.001, weight_decay=1e-5)
+    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    scheduler = torch.optim.lr_scheduler.StepLR(
+        optimizer, step_size=STEP_SIZE, gamma=GAMMA)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001,
-                                 betas=(0.9, 0.999), amsgrad=True)
-    num_steps = 10
+    num_steps = 5
+    epoch0 = 0
 
-    if True:
+    if False:
         # checkpoint = torch.load(latest_cp_path+"-model.pth")
         checkpoint = torch.load("model.pth")
         model.load_state_dict(checkpoint['model_state_dict'])
@@ -461,6 +418,9 @@ def main():
         epoch0 = checkpoint['epoch']
 
     model.to(device)
+
+    best_model_weights = copy.deepcopy(model.state_dict())
+    best_acc = 0.0
 
     # train model
     for epoch in range(epoch0, epoch0+num_epoch):
@@ -472,6 +432,11 @@ def main():
               f"train acc: {train_acc:.4f}\n"
               f"train simple acc: {train_simple_acc:.4f}")
 
+        if train_acc > best_acc:
+            best_acc = train_acc
+            best_model_weights = copy.deepcopy(model.state_dict())
+            torch.save(best_model_weights, 'model.pth')
+
         if epoch % num_steps == 0 or epoch == epoch0+num_epoch-1:
             print(f"checkpoint-{epoch} saved")
             cp_path = os.path.join(cp_folder, f"checkpoint-{epoch}")
@@ -479,6 +444,8 @@ def main():
                         'model_state_dict': model.state_dict(),
                         'optimizer_state_dict': optimizer.state_dict()},
                        cp_path+"-model.pth")
+
+        scheduler.step()
 
     # 提出用ファイルの作成
     model.eval()
