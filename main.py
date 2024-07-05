@@ -97,9 +97,15 @@ class VQADataset(torch.utils.data.Dataset):
         qt = torch.Tensor(question).to(torch.int)
 
         if self.answer:
-            answers = [self.answer2idx[process_text(
-                answer["answer"])] for answer in self.df["answers"][idx]]
-            mode_answer_idx = mode(answers)  # 最頻値を取得（正解ラベル）
+            answers = []
+            for answer in self.df['answers'][idx]:
+                answer_ = process_text(answer['answer'])
+                if answer_ not in self.answer2idx.keys():
+                    answers.append(self.answer2idx['<unk>'])
+                else:
+                    answers.append(self.answer2idx[answer_])
+
+            mode_answer_idx = mode(answers)
 
             return image, qt, torch.Tensor(answers), \
                 int(mode_answer_idx)
@@ -142,16 +148,18 @@ class VQAModel(nn.Module):
         self.resnet.fc = nn.Linear(
             in_features=512, out_features=512, bias=True)
 
-        self.hiddien_size = 512
+        self.hiddien_size = 128
 
         # self.text_encoder = nn.Linear(vocab_size, 512)
         self.text_encoder = nn.Linear(self.hiddien_size, 512)
 
-        self.lstm = nn.LSTM(input_size=vocab_size,
+        self.lstm = nn.LSTM(input_size=word_embed,
                             hidden_size=self.hiddien_size,
                             num_layers=2, batch_first=True)
 
-        self.embedding = nn.Embedding(vocab_size+1, vocab_size)
+        self.embedding = nn.Embedding(vocab_size+1, word_embed)
+        self.tanh = nn.Tanh()
+        self.fc_q = nn.Linear(512, 512)
 
         self.fc = nn.Sequential(
             nn.Dropout(0.5),
@@ -161,24 +169,25 @@ class VQAModel(nn.Module):
             nn.Linear(512, n_answer)
         )
 
-    def forward(self, image, question):
-        image_feature = self.resnet(image)  # 画像の特徴量
-        # question_feature = self.text_encoder(question)  # テキストの特徴量
-
+    def text_encoder(self, question):
         # (batchsize, qu_length=30, word_embed=300)
         question_embedding = self.embedding(question)
-        h, _ = self.lstm(question_embedding)
-        question_feature = h[:, -1]
+        question_embedding = self.tanh(question_embedding)
+        _, (hidden, cell) = self.lstm(question_embedding)
+        question_feature = torch.cat((hidden, cell), 2)
+        question_feature = question_feature.transpose(0, 1).reshape(
+            question_feature.size()[1], -1)
+        question_feature = self.tanh(question_feature)
+        text_feature = self.fc_q(question_feature)
 
-        # question_feature = torch.cat((hidden, cell), dim=2)
-        # question_feature = question_feature.transpose(0, 1)
-        # question_feature = question_feature.reshape(
-        #    question_feature.size()[0], -1)
-        # question_feature = nn.Tanh(question_feature)
+        return text_feature
 
-        # question_feature = self.text_encoder(question_feature)
+    def forward(self, image, question):
+        image_feature = self.resnet(image)  # 画像の特徴量
 
-        x = torch.cat([image_feature, question_feature], dim=1)
+        text_feature = self.text_encoder(question)
+
+        x = torch.cat([image_feature, text_feature], dim=1)
         x = self.fc(x)
 
         return x
@@ -280,7 +289,7 @@ def main():
     scheduler = torch.optim.lr_scheduler.StepLR(
         optimizer, step_size=STEP_SIZE, gamma=GAMMA)
 
-    model.load_state_dict(torch.load("model.pth"))
+    # model.load_state_dict(torch.load("model.pth"))
     model.to(device)
 
     best_model_weights = copy.deepcopy(model.state_dict())

@@ -67,7 +67,7 @@ def load_question_file(df_path):
     return question2idx
 
 
-def load_answer_file(df_path, corpus=None):
+def load_answer_file(df_path, top_answer=1000, corpus=None):
     # 回答に含まれる単語を辞書に追加
     df = pandas.read_json(df_path)
 
@@ -75,17 +75,33 @@ def load_answer_file(df_path, corpus=None):
 
     for answers in df["answers"]:
         for answer in answers:
-            word = answer["answer"]
-            word = process_text(word)
-            if word not in answer2idx:
-                answer2idx[word] = len(answer2idx)
+            word = process_text(answer["answer"])
+            if re.search(r'[^\w\s]', word):
+                continue
+            if word not in answer2idx.keys():
+                answer2idx[word] = 0
+            answer2idx[word] += 1
+
+            # if word not in answer2idx:
+            #    answer2idx[word] = len(answer2idx)
 
     if corpus is not None:  # 外部コーパスを追加
         df = pandas.read_csv(corpus)
         for index, row in df.iterrows():
             word = process_text(row['answer'])
-            if word not in answer2idx:
-                answer2idx[word] = len(answer2idx)
+            if re.search(r'[^\w\s]', word):
+                continue
+            if word not in answer2idx.keys():
+                answer2idx[word] = 0
+            answer2idx[word] += 1
+
+    answers = sorted(answer2idx, key=answer2idx.get,
+                     reverse=True)  # sort by numbers
+    top_answers = ['<unk>'] + answers[:top_answer-1]
+
+    answer2idx = {}
+    for word in top_answers:
+        answer2idx[word] = len(answer2idx)
 
     # idx2answer = {v: k for k,
     #                   v in answer2idx.items()}  # 逆変換用の辞書(answer)
@@ -108,6 +124,7 @@ if __name__ == "__main__":
     vocab_file = "vocab.pth"
 
     question2idx = load_question_file(df_path)
-    answer2idx = load_answer_file(df_path, corpus)
+    # answer2idx = load_answer_file(df_path, corpus=corpus)
+    answer2idx = load_answer_file(df_path)
 
     save_vocab_file(question2idx, answer2idx, vocab_file)
