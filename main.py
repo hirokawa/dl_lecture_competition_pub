@@ -8,6 +8,7 @@ import numpy as np
 import pandas
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 # import torchvision
 from torchvision import transforms, models
 # from transformers import AutoTokenizer, AutoModel
@@ -163,7 +164,8 @@ class VQAModel(nn.Module):
 
         self.fc = nn.Sequential(
             nn.Dropout(0.5),
-            nn.Linear(1024, 512),
+            nn.Linear(512, 512),
+            # nn.Linear(1024, 512),
             nn.ReLU(inplace=True),
             nn.Dropout(0.5),
             nn.Linear(512, n_answer)
@@ -184,10 +186,13 @@ class VQAModel(nn.Module):
 
     def forward(self, image, question):
         image_feature = self.resnet(image)  # 画像の特徴量
+        l2_norm = F.normalize(image_feature, p=2, dim=1).detach()
 
         text_feature = self.text_encoder(question)
 
-        x = torch.cat([image_feature, text_feature], dim=1)
+        x = l2_norm * text_feature
+
+        # x = torch.cat([l2_norm, text_feature], dim=1)
         x = self.fc(x)
 
         return x
@@ -283,13 +288,13 @@ def main():
                      word_embed=WORD_EMBED)
 
     # optimizer / criterion
-    num_epoch = 20
+    num_epoch = 4
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
     scheduler = torch.optim.lr_scheduler.StepLR(
         optimizer, step_size=STEP_SIZE, gamma=GAMMA)
 
-    # model.load_state_dict(torch.load("model.pth"))
+    model.load_state_dict(torch.load("model.pth"))
     model.to(device)
 
     best_model_weights = copy.deepcopy(model.state_dict())

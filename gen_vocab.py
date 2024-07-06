@@ -122,9 +122,16 @@ if __name__ == "__main__":
     df_path = "./data_vqa/train.json"
     corpus = "./data_vqa/class_mapping.csv"
     vocab_file = "vocab.pth"
+    top_answer = 40232+1  # with corpus
+    # top_answer = 39650+1
+    # top_answer = 1000
 
     question2idx = load_question_file(df_path)
-    # answer2idx = load_answer_file(df_path, corpus=corpus)
-    answer2idx = load_answer_file(df_path)
+    # answer2idx = load_answer_file(
+    #    df_path, top_answer=top_answer)
+    answer2idx = load_answer_file(
+        df_path, corpus=corpus, top_answer=top_answer)
+
+    # answer2idx = load_answer_file(df_path)
 
     save_vocab_file(question2idx, answer2idx, vocab_file)
