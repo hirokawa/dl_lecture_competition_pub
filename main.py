@@ -166,13 +166,18 @@ class VQAModel(nn.Module):
             nn.Dropout(0.5),
             nn.Linear(512, 512),
             # nn.Linear(1024, 512),
-            nn.ReLU(inplace=True),
+            nn.ReLU(),
             nn.Dropout(0.5),
             nn.Linear(512, n_answer)
         )
 
+        # self.fc = nn.Sequential(
+        #    nn.LayerNorm(1024),
+        #    nn.Dropout(0.5),
+        #    nn.Linear(1024, n_answer)
+        # )
+
     def text_encoder(self, question):
-        # (batchsize, qu_length=30, word_embed=300)
         question_embedding = self.embedding(question)
         question_embedding = self.tanh(question_embedding)
         _, (hidden, cell) = self.lstm(question_embedding)
@@ -186,13 +191,12 @@ class VQAModel(nn.Module):
 
     def forward(self, image, question):
         image_feature = self.resnet(image)  # 画像の特徴量
-        l2_norm = F.normalize(image_feature, p=2, dim=1).detach()
-
         text_feature = self.text_encoder(question)
 
+        l2_norm = F.normalize(image_feature, p=2, dim=1).detach()
         x = l2_norm * text_feature
 
-        # x = torch.cat([l2_norm, text_feature], dim=1)
+        # x = torch.cat([image_feature, text_feature], dim=1)
         x = self.fc(x)
 
         return x
@@ -265,7 +269,8 @@ def main():
     # dataloader / model
     transform = transforms.Compose([
         transforms.Resize((224, 224)),
-        transforms.RandomHorizontalFlip(p=0.5),
+        # transforms.RandomHorizontalFlip(p=0.5),
+        transforms.RandomRotation(90.0),
         transforms.ToTensor()
     ])
     train_dataset = VQADataset(df_path="./data_vqa/train.json",
@@ -294,7 +299,7 @@ def main():
     scheduler = torch.optim.lr_scheduler.StepLR(
         optimizer, step_size=STEP_SIZE, gamma=GAMMA)
 
-    model.load_state_dict(torch.load("model.pth"))
+    # model.load_state_dict(torch.load("model_VQA_20240705.pth"))
     model.to(device)
 
     best_model_weights = copy.deepcopy(model.state_dict())
@@ -311,6 +316,7 @@ def main():
               f"train simple acc: {train_simple_acc:.4f}")
 
         if train_acc > best_acc:
+            print("save model {:f}>{:f}".format(train_acc, best_acc))
             best_acc = train_acc
             best_model_weights = copy.deepcopy(model.state_dict())
             torch.save(best_model_weights, 'model.pth')

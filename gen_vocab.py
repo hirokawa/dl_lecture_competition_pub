@@ -125,6 +125,7 @@ if __name__ == "__main__":
     top_answer = 40232+1  # with corpus
     # top_answer = 39650+1
     # top_answer = 1000
+    # top_answer = 6000
 
     question2idx = load_question_file(df_path)
     # answer2idx = load_answer_file(
