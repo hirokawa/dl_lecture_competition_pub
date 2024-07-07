@@ -9,10 +9,7 @@ import pandas
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-# import torchvision
 from torchvision import transforms, models
-# from transformers import AutoTokenizer, AutoModel
-
 from gen_vocab import process_text, load_vocab_file
 
 
@@ -141,41 +138,36 @@ def VQA_criterion(batch_pred: torch.Tensor, batch_answers: torch.Tensor):
 class VQAModel(nn.Module):
     def __init__(self, vocab_size: int, n_answer: int, word_embed: int):
         super().__init__()
-        # self.resnet = ResNet18()
-        # self.resnet = ResNet50()
+
+        self.out_features = 512  # output size of image part
+
+        self.num_layers = 2  # LSTM number of hidden layers
+        self.hiddien_size = 128  # LSTM hidden size
+
+        self.fuze_hiddien_size = 512  # fusion part hidden size
 
         self.resnet = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
-        # torch.hub.load("pytorch/vision", "resnet18", weights="IMAGENET1K_V1")
+
         self.resnet.fc = nn.Linear(
-            in_features=512, out_features=512, bias=True)
-
-        self.hiddien_size = 128
-
-        # self.text_encoder = nn.Linear(vocab_size, 512)
-        self.text_encoder = nn.Linear(self.hiddien_size, 512)
-
-        self.lstm = nn.LSTM(input_size=word_embed,
-                            hidden_size=self.hiddien_size,
-                            num_layers=2, batch_first=True)
+            in_features=self.resnet.fc.in_features,
+            out_features=self.out_features, bias=True)
 
         self.embedding = nn.Embedding(vocab_size+1, word_embed)
+        self.lstm = nn.LSTM(input_size=word_embed,
+                            hidden_size=self.hiddien_size,
+                            num_layers=self.num_layers, batch_first=True)
+
         self.tanh = nn.Tanh()
-        self.fc_q = nn.Linear(512, 512)
+        self.fc_q = nn.Linear(2*self.hiddien_size*self.num_layers,
+                              self.out_features)
 
         self.fc = nn.Sequential(
             nn.Dropout(0.5),
-            nn.Linear(512, 512),
-            # nn.Linear(1024, 512),
+            nn.Linear(self.out_features, self.fuze_hiddien_size),
             nn.ReLU(),
             nn.Dropout(0.5),
-            nn.Linear(512, n_answer)
+            nn.Linear(self.fuze_hiddien_size, n_answer)
         )
-
-        # self.fc = nn.Sequential(
-        #    nn.LayerNorm(1024),
-        #    nn.Dropout(0.5),
-        #    nn.Linear(1024, n_answer)
-        # )
 
     def text_encoder(self, question):
         question_embedding = self.embedding(question)
@@ -196,7 +188,6 @@ class VQAModel(nn.Module):
         l2_norm = F.normalize(image_feature, p=2, dim=1).detach()
         x = l2_norm * text_feature
 
-        # x = torch.cat([image_feature, text_feature], dim=1)
         x = self.fc(x)
 
         return x
@@ -299,7 +290,7 @@ def main():
     scheduler = torch.optim.lr_scheduler.StepLR(
         optimizer, step_size=STEP_SIZE, gamma=GAMMA)
 
-    # model.load_state_dict(torch.load("model_VQA_20240705.pth"))
+    # model.load_state_dict(torch.load("model.pth"))
     model.to(device)
 
     best_model_weights = copy.deepcopy(model.state_dict())
@@ -316,26 +307,12 @@ def main():
               f"train simple acc: {train_simple_acc:.4f}")
 
         if train_acc > best_acc:
-            print("save model {:f}>{:f}".format(train_acc, best_acc))
+            print("save model {:f} > {:f}".format(train_acc, best_acc))
             best_acc = train_acc
             best_model_weights = copy.deepcopy(model.state_dict())
             torch.save(best_model_weights, 'model.pth')
 
         scheduler.step()
-
-    # 提出用ファイルの作成
-    model.eval()
-    submission = []
-    for image, question in test_loader:
-        image, question = image.to(device), question.to(device)
-        pred = model(image, question)
-        pred = pred.argmax(1).cpu().item()
-        submission.append(pred)
-
-    submission = [train_dataset.idx2answer[id] for id in submission]
-    submission = np.array(submission)
-
-    np.save("submission.npy", submission)
 
 
 if __name__ == "__main__":
