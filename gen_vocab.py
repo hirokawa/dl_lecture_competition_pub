@@ -8,6 +8,10 @@ Created on Sun Jun 30 18:28:46 2024
 import re
 import pandas
 import torch
+from statistics import mode
+
+import numpy as np
+import matplotlib.pyplot as plt
 
 
 def process_text(text):
@@ -118,20 +122,89 @@ def load_vocab_file(vocab_file='vocab.pth'):
     return d['question2idx'], d['answer2idx']
 
 
+def analyse_answer_file(df_path):
+    # 回答に含まれる単語を辞書に追加
+    df = pandas.read_json(df_path)
+
+    answer_ = {}
+    len_ = len(df)
+
+    for answers in df["answers"]:
+        word_ = []
+        for answer in answers:
+            if answer['answer_confidence'] == 'no':
+                continue
+            word = process_text(answer["answer"])
+            # if re.search(r'[^\w\s]', word):
+            #    continue
+            word_.append(word)
+        if len(word_) == 0:
+            print("no answer")
+        word_mode = mode(word_)
+        # print("{:s}".format(word_mode))
+
+        if word_mode not in answer_.keys():
+            answer_[word_mode] = 0
+        answer_[word_mode] += 1
+
+    return answer_, len_
+
+
 if __name__ == "__main__":
     df_path = "./data_vqa/train.json"
-    corpus = "./data_vqa/class_mapping.csv"
+    corpus = "./data_vqa/class_mapping.csv"  # 5726
     vocab_file = "vocab.pth"
     top_answer = 40232+1  # with corpus
     # top_answer = 39650+1
     # top_answer = 1000
     # top_answer = 6000
 
+    answer_, len_ = analyse_answer_file(df_path)
+
+    answers = sorted(answer_, key=answer_.get,
+                     reverse=True)  # sort by numbers
+
+    # 19873
+    print(np.sum([i for i in answer_.values()]))
+
+    rng = len(answer_)  # 5533
+    num_ = []
+    sum_ = []
+
+    for i in range(rng):
+        num_.append(answer_[answers[i]]/len_*100)
+
+    for i in range(rng):
+        sum_.append(np.sum(num_[:i]))
+
+    plt.figure()
+    plt.plot(np.arange(rng), sum_)
+    plt.grid()
+    plt.ylabel('occurance [%]')
+    plt.xlabel('number of responses (sorted)')
+    plt.show()
+
+    # 1-10 47.2%, 1-20 50.3%
+
+    rng = 20  # 5533
+    num_ = []
+
+    for i in range(rng):
+        num_.append(answer_[answers[i]]/len_*100)
+
+    plt.figure()
+    plt.bar(np.arange(rng), num_, tick_label=answers[:rng], align='center')
+    plt.xticks(np.arange(rng), answers[:rng], rotation='vertical')
+    plt.grid()
+    plt.ylabel('occurance [%]')
+    # 35.4%
+    plt.show()
+
     question2idx = load_question_file(df_path)
-    # answer2idx = load_answer_file(
-    #    df_path, top_answer=top_answer)
     answer2idx = load_answer_file(
-        df_path, corpus=corpus, top_answer=top_answer)
+        df_path, top_answer=top_answer)
+    # answer2idx = load_answer_file(
+    #    df_path, corpus=corpus, top_answer=top_answer)
 
     # answer2idx = load_answer_file(df_path)
 

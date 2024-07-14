@@ -32,7 +32,7 @@ def test():
                      n_answer=len(train_dataset.answer2idx),
                      word_embed=WORD_EMBED)
 
-    model.load_state_dict(torch.load("model_VQA_20240706b.pth"))
+    model.load_state_dict(torch.load("model.pth"))
     model.to(device)
 
     # 提出用ファイルの作成
