@@ -5,18 +5,20 @@ Created on Fri Jul 12 20:51:02 2024
 @author: ruihi
 """
 
+import copy
+import time
 import os
 import pandas as pd
-import requests
+# import requests
 from copy import deepcopy
-from dataclasses import dataclass
+# from dataclasses import dataclass
 from datasets import Dataset, DatasetDict
 from typing import Dict, List, Optional, Tuple
 import numpy as np
 from PIL import Image
 import torch
 import torch.nn as nn
-from transformers import ViTImageProcessor, ViTModel, AutoTokenizer, \
+from transformers import AutoTokenizer, \
     AutoFeatureExtractor, AutoModel, TrainingArguments, Trainer
 import re
 from statistics import mode
@@ -94,7 +96,7 @@ def loadData(file_train: str, file_eval: str):
             answers.append(process_text(j['answer']))
         temp.append(answers)
         temp.append(i['image'])
-        temp.append(mode(answers))
+        temp.append(answers.index(mode(answers)))
         trainList.append(temp)
 
     for k in range(len(data_val)):
@@ -143,10 +145,14 @@ for answers in dataset['train']['answer']:
 answer_space = sorted(answer_space)
 
 
-@dataclass
 class MultimodalCollator:
     tokenizer: AutoTokenizer
     preprocessor: AutoFeatureExtractor
+
+    def __init__(self, tokenizer: AutoTokenizer,
+                 preprocessor: AutoFeatureExtractor):
+        self.tokenizer = tokenizer
+        self.preprocessor = preprocessor
 
     def tokenize_text(self, texts: List[str]) -> Dict[str, torch.Tensor]:
         """
@@ -154,7 +160,8 @@ class MultimodalCollator:
         """
         encoded_text = self.tokenizer(
             text=texts,
-            padding='longest',
+            # padding='longest',
+            padding='max_length',
             max_length=24,
             truncation=True,
             return_tensors='pt',
@@ -173,8 +180,9 @@ class MultimodalCollator:
         """
         processed_images = self.preprocessor(
             images=[
-                Image.open(os.path.join("data_vqa/" + (
-                    "train/train/" if "_train_" in image_id else "val/val/"),
+                Image.open(os.path.join(
+                    "data_vqa/" + ("train/" if "train_"
+                                   in image_id else "val/"),
                     image_id)).convert('RGB')
                 for image_id in images
             ],
@@ -201,8 +209,72 @@ class MultimodalCollator:
         return {
             **self.tokenize_text(question_batch),
             **self.preprocess_images(image_id_batch),
-            'labels': torch.tensor(label_batch, dtype=torch.int64),
+            'labels': torch.tensor(label_batch, dtype=torch.int64).squeeze(),
         }
+
+
+class VQADataset(torch.utils.data.Dataset):
+    tokenizer: AutoTokenizer
+    preprocessor: AutoFeatureExtractor
+
+    def __init__(self, tokenizer: AutoTokenizer,
+                 preprocessor: AutoFeatureExtractor, dataset):
+        self.tokenizer = tokenizer
+        self.preprocessor = preprocessor
+        self.df = dataset
+
+    def tokenize_text(self, texts: List[str]) -> Dict[str, torch.Tensor]:
+        """
+        Tokenize text inputs and return relevant tokenized information.
+        """
+        encoded_text = self.tokenizer(
+            text=texts,
+            #            padding='longest',
+            padding='max_length',
+            max_length=24,
+            truncation=True,
+            return_tensors='pt',
+            return_token_type_ids=True,
+            return_attention_mask=True,
+        )
+        return {
+            "input_ids": encoded_text['input_ids'].squeeze(),
+            "token_type_ids": encoded_text['token_type_ids'].squeeze(),
+            "attention_mask": encoded_text['attention_mask'].squeeze(),
+        }
+
+    def preprocess_images(self, images: List[str]) -> Dict[str, torch.Tensor]:
+        """
+        Extract features from images and return the processed pixel values.
+        """
+
+        processed_images = self.preprocessor(
+            images=[
+                Image.open(os.path.join(
+                    "data_vqa/" + ("train/" if "train_"
+                                   in image_id else "valid/"),
+                    image_id)).convert('RGB')
+                for image_id in images
+            ],
+            return_tensors="pt",
+        )
+        return {
+            "pixel_values": processed_images['pixel_values'].squeeze(),
+        }
+
+    def __getitem__(self, idx):
+
+        question_batch = [self.df['question'][idx]]
+        image_id_batch = [self.df['image_id'][idx]]
+        label_batch = [self.df['label'][idx]]
+
+        text = self.tokenize_text(question_batch)
+        image = self.preprocess_images(image_id_batch)
+
+        return text, image, torch.tensor(label_batch, dtype=torch.int64).squeeze()
+
+    def __len__(self):
+        return len(self.df)
 
 
 class VQAModel(nn.Module):
@@ -456,7 +528,7 @@ if False:
 
 
 args = TrainingArguments(
-    output_dir="checkpoint-" + fn_model + "-",
+    output_dir="checkpoint-" + fn_model,
     # Output directory for checkpoints and logs=
     seed=12345,                         # Seed for reproducibility
     evaluation_strategy="epoch",        # Eval. strategy: "steps" or "epoch"
@@ -469,15 +541,15 @@ args = TrainingArguments(
     save_total_limit=3,
     metric_for_best_model='wups',
     # Metric used for determining the best model
-    per_device_train_batch_size=32,     # Batch size per GPU for training
-    per_device_eval_batch_size=32,      # Batch size per GPU for evaluation
+    per_device_train_batch_size=2,     # Batch size per GPU for training
+    per_device_eval_batch_size=2,      # Batch size per GPU for evaluation
     # Whether to remove unused columns in the dataset
     remove_unused_columns=False,
     num_train_epochs=5,                 # Number of training epochs
     optim="adamw_torch",
     # Enable mixed precision training (float16)
     fp16=True,
-    dataloader_num_workers=8,           # Number of workers for data loading
+    # dataloader_num_workers=8,           # Number of workers for data loading
     # Whether to load the best model at the end of training
     load_best_model_at_end=True,
 )
@@ -505,18 +577,38 @@ def create_and_train_model(dataset, args, text_model=txt_model,
 
     # Create a copy of arguments and set the output directory
     multi_args = deepcopy(args)
-    multi_args.output_dir = os.path.join(
-        "checkpoint-", multimodal_model)
+    multi_args.output_dir = os.path.join("checkpoint", multimodal_model)
     print(multi_args.output_dir)
-    # Create Trainer for Multimodal Model
-    multi_trainer = Trainer(
-        model,
-        multi_args,
-        train_dataset=dataset['train'],
-        eval_dataset=dataset['test'],
-        data_collator=collator,
-        compute_metrics=compute_metrics
-    )
+
+    if True:
+        tokenizer = AutoTokenizer.from_pretrained(text_model)
+        preprocessor = AutoFeatureExtractor.from_pretrained(image_model)
+
+        # Create Multimodal Collator
+        train_dataset = VQADataset(
+            tokenizer=tokenizer, preprocessor=preprocessor, dataset=dataset['train'])
+
+        train_loader = torch.utils.data.DataLoader(
+            train_dataset, batch_size=32, shuffle=True)
+
+        for question, image, mode_answer in train_loader:
+
+            pred = model(input_ids=question['input_ids'].to(device),
+                         pixel_values=image['pixel_values'].to(device),
+                         attention_mask=question['attention_mask'].to(device),
+                         token_type_ids=question['token_type_ids'].to(device),
+                         labels=mode_answer.to(device))
+
+    else:
+
+        # Create Trainer for Multimodal Model
+        multi_trainer = Trainer(
+            model,
+            multi_args,
+            train_dataset=dataset['train'],
+            data_collator=collator,
+            compute_metrics=compute_metrics
+        )
 
     # Train and evaluate for metrics
     train_multi_metrics = multi_trainer.train()
@@ -526,5 +618,98 @@ def create_and_train_model(dataset, args, text_model=txt_model,
         multi_trainer
 
 
-collator, model, train_multi_metrics, eval_multi_metrics, trainer = \
-    create_and_train_model(dataset, args)
+def VQA_criterion(batch_pred: torch.Tensor, batch_answers: torch.Tensor):
+    total_acc = 0.
+
+    for pred, answers in zip(batch_pred, batch_answers):
+        acc = 0.
+        for i in range(len(answers)):
+            num_match = 0
+            for j in range(len(answers)):
+                if i == j:
+                    continue
+                if pred == answers[j]:
+                    num_match += 1
+            acc += min(num_match / 3, 1)
+        total_acc += acc / 10
+
+    return total_acc / len(batch_pred)
+
+
+def train(model, dataloader, optimizer, criterion, device):
+    model.train()
+
+    total_loss = 0
+    total_acc = 0
+    simple_acc = 0
+
+    start = time.time()
+
+    for question, image, mode_answer in dataloader:
+
+        model.zero_grad()
+
+        mode_answer = mode_answer.to(device)
+
+        pred = model(input_ids=question['input_ids'].to(device),
+                     pixel_values=image['pixel_values'].to(device),
+                     attention_mask=question['attention_mask'].to(device),
+                     token_type_ids=question['token_type_ids'].to(device),
+                     labels=mode_answer)
+
+        # optimizer.zero_grad()
+        pred['loss'].backward()
+        optimizer.step()
+
+        total_loss += pred['loss'].item()
+        # VQA accuracy
+        total_acc += VQA_criterion(pred['logits'].argmax(1), answers)
+        simple_acc += (pred['logits'].argmax(1) ==
+                       mode_answer).float().mean().item()
+
+    return total_loss / len(dataloader), total_acc / len(dataloader), \
+        simple_acc / len(dataloader), time.time() - start
+
+
+if False:
+    collator, model, train_multi_metrics, eval_multi_metrics, trainer = \
+        create_and_train_model(dataset, args)
+else:
+    collator, model = create_multimodal_vqa_collator_and_model(
+        txt_model, img_model)
+
+    tokenizer = AutoTokenizer.from_pretrained(txt_model)
+    preprocessor = AutoFeatureExtractor.from_pretrained(img_model)
+
+    # Create Multimodal Collator
+    train_dataset = VQADataset(
+        tokenizer=tokenizer, preprocessor=preprocessor,
+        dataset=dataset['train'])
+
+    train_loader = torch.utils.data.DataLoader(
+        train_dataset, batch_size=32, shuffle=True)
+
+    num_epoch = 2
+    criterion = nn.CrossEntropyLoss()
+    # optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.01,
+                                 betas=(0.9, 0.999), amsgrad=True)
+
+    best_acc = 0.0
+
+    for epoch in range(num_epoch):
+
+        train_loss, train_acc, train_simple_acc, train_time = train(
+            model, train_loader, optimizer, criterion, device)
+
+        print(f"【{epoch + 1}/{num_epoch}】\n"
+              f"train time: {train_time:.2f} [s]\n"
+              f"train loss: {train_loss:.4f}\n"
+              f"train acc: {train_acc:.4f}\n"
+              f"train simple acc: {train_simple_acc:.4f}")
+
+        if train_acc > best_acc:
+            print("save model {:f} > {:f}".format(train_acc, best_acc))
+            best_acc = train_acc
+            best_model_weights = copy.deepcopy(model.state_dict())
+            torch.save(best_model_weights, 'model.pth')
